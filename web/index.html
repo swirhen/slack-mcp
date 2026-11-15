@@ -233,10 +233,12 @@ document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click
 
 // ---------------- AI コネクタ ----------------
 async function loadClients() {
-  state.clients = (await api('GET', 'clients')).clients;
+  state.clients = (await api('GET', 'clients')).clients.map((c) => ({ ...c, url: fullUrl(c.url) }));
   renderClients();
 }
 
+// サーバーが相対パス (../mcp/<トークン>) で返したときは、この画面の URL をもとに完全な URL にする
+function fullUrl(url) { return new URL(url, location.href).href; }
 function maskedUrl(url) { return url.replace(/[0-9a-f]{64}$/, (t) => t.slice(0, 6) + '…' + t.slice(-4)); }
 
 function renderClients() {
@@ -318,14 +320,14 @@ $('#client-save').addEventListener('click', async (e) => {
     else saved = await api('POST', 'clients', { id: f.id.value.trim(), ...body });
     $('#client-dialog').close();
     await loadClients();
-    if (!state.editingClient) { await copy(saved.url, 'コネクタの URL'); toast(`${saved.id} を追加しました。URL をコピーしたので、AI に登録してください`); }
+    if (!state.editingClient) { await copy(fullUrl(saved.url), 'コネクタの URL'); toast(`${saved.id} を追加しました。URL をコピーしたので、AI に登録してください`); }
     else toast('保存しました');
   } catch (err) { $('#client-msg').textContent = err.message; }
 });
 
 async function regenerateClient(c) {
   if (!confirm(`${c.id} の URL を作り直しますか?\n今の URL はすぐ使えなくなるので、AI のコネクタに新しい URL を登録し直す必要があります。`)) return;
-  try { const saved = await api('POST', `clients/${encodeURIComponent(c.id)}/regenerate`); await loadClients(); await copy(saved.url, '新しい URL'); }
+  try { const saved = await api('POST', `clients/${encodeURIComponent(c.id)}/regenerate`); await loadClients(); await copy(fullUrl(saved.url), '新しい URL'); }
   catch (err) { alert(err.message); }
 }
 async function removeClient(c) {

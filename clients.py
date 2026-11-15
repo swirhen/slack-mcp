@@ -36,7 +36,9 @@ import sys
 import threading
 
 CLIENTS_FILE = Path(os.environ.get('SLACK_MCP_CLIENTS_FILE', Path(__file__).resolve().parent / 'clients.json'))
-PUBLIC_BASE = os.environ.get('SLACK_MCP_PUBLIC_URL', 'https://swirhen.tv/slack_mcp/mcp').rstrip('/')
+# コネクタの URL の前半 (例 https://example.com/slack_mcp/mcp)。空なら管理画面から見た相対パス ../mcp/<トークン> にし、
+# 画面が開いている URL をもとに完全な URL に直す (管理画面を .../admin/、MCP を同じ階層の .../mcp/ で公開しているとき)
+PUBLIC_BASE = os.environ.get('SLACK_MCP_PUBLIC_URL', '').rstrip('/')
 ID_RE = re.compile(r'^[a-z0-9_-]{1,32}$')
 TOKEN_RE = re.compile(r'^[0-9a-f]{64}$')
 EMOJI_RE = re.compile(r'^:[a-z0-9_+\-\']+:$')
@@ -96,7 +98,16 @@ def find_by_id(cid: str) -> dict | None:
 
 
 def connector_url(client: dict) -> str:
-    return f'{PUBLIC_BASE}/{client["token"]}'
+    if PUBLIC_BASE:
+        return f'{PUBLIC_BASE}/{client["token"]}'
+    return f'../mcp/{client["token"]}'
+
+
+def _cli_url(url: str) -> str:
+    """コマンドで表示する URL。公開 URL が未設定のときは、相対パスであることを書き添える"""
+    if PUBLIC_BASE:
+        return url
+    return f'{url}  (管理画面の URL から見た相対パス。SLACK_MCP_PUBLIC_URL を設定すると完全な URL を表示する)'
 
 
 # ---- 書き込み (CLI と管理画面から使う。値が正しくなければ ValueError、ない id は KeyError) ----
@@ -263,16 +274,16 @@ def main(argv=None) -> None:
             token = Path(args.token_file).read_text(encoding='ascii').strip() if args.token_file else None
             c = create_client(args.id, token=token, **options)
             print(_describe(c))
-            print(f'コネクタの URL: {c["url"]}')
+            print(f'コネクタの URL: {_cli_url(c["url"])}')
         elif args.command == 'set':
             print(_describe(update_client(args.id, **options)))
         elif args.command == 'url':
             c = find_by_id(args.id)
             if c is None:
                 raise KeyError(args.id)
-            print(connector_url(c))
+            print(_cli_url(connector_url(c)))
         elif args.command == 'regenerate':
-            print(f'トークンを作り直した。新しいコネクタの URL: {regenerate_client(args.id)["url"]}')
+            print(f'トークンを作り直した。新しいコネクタの URL: {_cli_url(regenerate_client(args.id)["url"])}')
         elif args.command == 'remove':
             remove_client(args.id)
             print(f'{args.id} を消した (その URL はすぐ使えなくなる)')

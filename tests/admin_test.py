@@ -21,6 +21,7 @@ os.environ.update({
     'SLACK_API_BASE': f'http://127.0.0.1:{SLACK_PORT}/api',
     'SLACK_MCP_ACCOUNTS_DIR': str(tmp / 'accounts'),
     'SLACK_MCP_CLIENTS_FILE': str(tmp / 'clients.json'),
+    'SLACK_MCP_PUBLIC_URL': 'https://example.com/slack_mcp/mcp',
     'SLACK_MCP_ADMIN_USERNAME': 'admin',
     'SLACK_MCP_ADMIN_PASSWORD': 'pass-word',
     'SLACK_MCP_ADMIN_SECRET': 'test-secret',
@@ -115,8 +116,11 @@ def run():
     # ---- AI コネクタ ----
     r = c.post('/api/clients', json={'id': 'claude', 'name': 'Claude', 'icon_emoji': 'robot_face', 'accounts': ['team-a']})
     cl = r.json()
-    check('client created with url', r.status_code == 200 and cl['url'].startswith('https://swirhen.tv/slack_mcp/mcp/')
+    check('client created with url', r.status_code == 200 and cl['url'].startswith('https://example.com/slack_mcp/mcp/')
           and cl['icon_emoji'] == ':robot_face:' and cl['post_as'] == 'bot' and cl['accounts'] == ['team-a'], r.text)
+    saved_base, clients.PUBLIC_BASE = clients.PUBLIC_BASE, ''
+    check('relative url without public url', clients.connector_url(cl) == '../mcp/' + cl['token'])
+    clients.PUBLIC_BASE = saved_base
     found = clients.find_by_token(cl['token'])
     check('MCP side sees new client immediately', found is not None and found['id'] == 'claude', found)
     r = c.post('/api/clients', json={'id': 'claude', 'name': 'X'})
