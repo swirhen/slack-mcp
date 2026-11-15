@@ -9,6 +9,7 @@ AI (claude.ai・ChatGPT など) ごとに別のコネクタ URL を発行し、�
 - リポジトリ: `swirhen/slack-mcp` (非公開)
 - 本番の配置先: `/home/swirhen/slack-mcp`
 - 公開 URL: Apache 配下の `/slack_mcp/mcp/<トークン>` (`127.0.0.1:8009` へ転送)
+- 管理画面: `https://swirhen.tv/slack_mcp/admin/` (`127.0.0.1:8010` へ転送。AI のコネクタと Slack アカウントをここで設定する)
 
 ---
 
@@ -29,6 +30,7 @@ AI (claude.ai・ChatGPT など) ごとに別のコネクタ URL を発行し、�
 | `slack_client.py` | Slack Web API の薄いクライアント (レート制限の再試行、ファイルの送受信) |
 | `accounts.py` | `accounts/<アカウント名>.toml` の読み込み |
 | `clients.py` | AI ごとのコネクタ (URL のトークン・表示名・アイコン・投稿方法・使えるアカウント) の管理 |
+| `web/api.py` / `web/index.html` | 管理画面 (FastAPI と、それが配る 1 枚の HTML。ビルドは要らない) |
 | `slack_app_manifest.json` | Slack アプリを作るときのマニフェスト (必要なスコープが入っている) |
 | `account.example.toml` | アカウントの設定ファイルの例 |
 | `tests/` | 偽の Slack API に対する通し試験 |
@@ -84,7 +86,30 @@ Canvas・List の作成と編集、チャンネルの作成は本人の名前で
 
 ---
 
+## 管理画面
+
+`https://swirhen.tv/slack_mcp/admin/` でログインして、次のことができる。保存は再起動しなくても MCP サーバーにすぐ効く。
+
+- **AI コネクタ**: AI の追加・編集・削除、コネクタ URL の表示・コピー・作り直し (表示名・アイコン・投稿方法・使えるアカウント・読み取り専用・本人としての操作の許可)
+- **Slack アカウント**: `accounts/<名前>.toml` の作成・編集・削除 (削除は `accounts/.deleted/` へ移す)。トークンは画面に表示せず、空のまま保存すると今のトークンを残す。
+  接続テストで、どのワークスペースのどのユーザー・bot か、マニフェストのスコープで足りないものがないかを確かめる
+- **Slack アプリの設定**: アプリの作り方と、マニフェストのコピー
+
+ログイン情報は本番では `/etc/default/slack-mcp-admin` (root 所有・600)、ローカルではリポジトリ直下の `idpass.txt` (1 行目がユーザー名、2 行目がパスワード。Git 管理外)。
+
+```
+SLACK_MCP_ADMIN_USERNAME=…
+SLACK_MCP_ADMIN_PASSWORD=…
+SLACK_MCP_ADMIN_SECRET=…    # Cookie の署名用。長いランダムな文字列 (openssl rand -hex 32)。変えると全員ログアウトする
+```
+
+- Cookie は HttpOnly・SameSite=Strict・Secure (本番)。書き込みの API は JSON しか受け付けない (他サイトからのフォーム送信を防ぐ)
+- 同じ接続元からログインに 10 分で 10 回失敗すると、しばらく受け付けない
+- ローカルで開くとき: `python -m uvicorn --app-dir web api:app --host 127.0.0.1 --port 8010` で `http://127.0.0.1:8010/`
+
 ## AI ごとのコネクタ (`clients.py`)
+
+管理画面と同じことをコマンドでもできる。
 
 AI ごとに 1 つ、コネクタの URL (`/slack_mcp/mcp/<トークン>`) を発行する。設定は `clients.json` (Git 管理外・600)。
 追加・変更・作り直しは再起動しなくてもすぐ効く。
@@ -144,6 +169,7 @@ AI ごとに 1 つ、コネクタの URL (`/slack_mcp/mcp/<トークン>`) を�
 python -m venv $env:USERPROFILE\.venv\slack-mcp
 & $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe -m pip install -r requirements.txt
 & $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe tests\smoke.py        # 偽の Slack に対する通し試験
+& $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe tests\admin_test.py   # 管理画面の API の試験
 & $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe clients.py add local --name Local
 & $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe mcp_server\server.py   # http://127.0.0.1:8009/mcp/<トークン>
 ```
@@ -176,7 +202,19 @@ sudo systemctl enable --now slack-mcp.service
 systemctl is-active slack-mcp.service
 ```
 
-Apache は `dotfile/apache2/sites-available/000-default.conf` に `/slack_mcp/mcp/` → `127.0.0.1:8009/mcp/` の転送がある。
+管理画面:
+
+```bash
+sudo install -m 600 -o root -g root /dev/null /etc/default/slack-mcp-admin
+sudo vi /etc/default/slack-mcp-admin      # SLACK_MCP_ADMIN_USERNAME / PASSWORD / SECRET を書く
+sudo cp web/slack-mcp-admin.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now slack-mcp-admin.service
+systemctl is-active slack-mcp-admin.service
+```
+
+Apache は `dotfile/apache2/sites-available/000-default.conf` に `/slack_mcp/mcp/` → `127.0.0.1:8009/mcp/` と、
+`/slack_mcp/admin/` → `127.0.0.1:8010/` の転送がある。
 本番の `~/dotfile` で `git pull` → `sudo apachectl configtest` → `sudo systemctl reload apache2`。
 
 ### claude.ai への登録
@@ -195,7 +233,7 @@ rm mcp_token
 ### 更新
 
 ```bash
-ssh prod-checker "cd /home/swirhen/slack-mcp && git pull --ff-only && sudo systemctl restart slack-mcp.service && systemctl is-active slack-mcp.service"
+ssh prod-checker "cd /home/swirhen/slack-mcp && git pull --ff-only && sudo systemctl restart slack-mcp.service slack-mcp-admin.service && systemctl is-active slack-mcp.service slack-mcp-admin.service"
 ```
 
 ---

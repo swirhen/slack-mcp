@@ -7,6 +7,8 @@
   SLACK_MCP_ACCOUNTS_DIR  設定ファイルの置き場所 (省略時はリポジトリ直下の accounts/)
 """
 from pathlib import Path
+import datetime
+import json
 import os
 import re
 import sys
@@ -74,3 +76,55 @@ def read_account(name: str) -> dict:
     }
     _cache[name] = (key, config)
     return config
+
+
+# ---- 書き込み (管理画面から使う。値が正しくなければ AccountError) ----
+LABEL_MAX = 200
+
+
+def _toml_string(value: str) -> str:
+    # JSON の文字列の書き方は TOML の基本文字列としてもそのまま読める (\" \ \n \uXXXX)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def write_account(name: str, user_token: str, bot_token: str | None = None, label: str = '',
+                  read_only: bool = False, create: bool = False) -> dict:
+    """accounts/<name>.toml を書く (600)。create=True ならすでにあるとき、False ならないときに失敗する"""
+    path = account_path(name)
+    if create and path.exists():
+        raise AccountError(f'アカウント「{name}」はすでにある')
+    if not create and not path.exists():
+        raise AccountError(f'アカウント「{name}」がない')
+    user_token = (user_token or '').strip()
+    bot_token = (bot_token or '').strip() or None
+    label = (label or '').strip()
+    if not TOKEN_RE.fullmatch(user_token):
+        raise AccountError('user_token は xoxp- で始まる User OAuth Token')
+    if bot_token and not BOT_TOKEN_RE.fullmatch(bot_token):
+        raise AccountError('bot_token は xoxb- で始まる Bot User OAuth Token')
+    if len(label) > LABEL_MAX or '\n' in label:
+        raise AccountError(f'説明は 1 行・{LABEL_MAX} 文字まで')
+    lines = ['# slack-mcp のアカウント設定 (管理画面で保存)', f'user_token = {_toml_string(user_token)}']
+    if bot_token:
+        lines.append(f'bot_token = {_toml_string(bot_token)}')
+    lines += [f'label = {_toml_string(label)}', f'read_only = {"true" if read_only else "false"}']
+    ACCOUNTS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + '.tmp')
+    with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w', encoding='utf-8', newline='\n') as f:
+        f.write('\n'.join(lines) + '\n')
+    os.replace(temporary, path)
+    _cache.pop(name, None)
+    return read_account(name)
+
+
+def delete_account(name: str) -> Path:
+    """設定を消さずに accounts/.deleted/<name>-<日時>.toml へ移す。移した先を返す"""
+    path = account_path(name)
+    if not path.exists():
+        raise AccountError(f'アカウント「{name}」がない')
+    trash = ACCOUNTS_DIR / '.deleted'
+    trash.mkdir(mode=0o700, exist_ok=True)
+    dest = trash / f'{name}-{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}.toml'
+    os.replace(path, dest)
+    _cache.pop(name, None)
+    return dest

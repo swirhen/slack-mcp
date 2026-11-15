@@ -8,3 +8,5 @@ __pycache__/
 logs/
 # AI ごとのコネクタの設定 (URL のトークンを含む)
 clients.json
+# ローカル開発用の管理画面のログイン情報
+idpass.txt

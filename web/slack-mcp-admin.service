@@ -1,0 +1,20 @@
+[Unit]
+Description=slack-mcp 管理画面 (AI のコネクタと Slack アカウントの設定)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=swirhen
+Group=swirhen
+WorkingDirectory=/home/swirhen/slack-mcp
+# SLACK_MCP_ADMIN_USERNAME・SLACK_MCP_ADMIN_PASSWORD・SLACK_MCP_ADMIN_SECRET はここに書く (root 所有・600)
+EnvironmentFile=/etc/default/slack-mcp-admin
+Environment=SLACK_MCP_ADMIN_SECURE_COOKIE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/swirhen/slack-mcp/.venv/bin/python -m uvicorn --app-dir web api:app --host 127.0.0.1 --port 8010 --no-access-log
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

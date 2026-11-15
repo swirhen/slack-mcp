@@ -91,6 +91,13 @@ LIST_ITEMS = [
 EMOJI = {'partyparrot': 'https://emoji.example/partyparrot.gif', 'shipit': 'alias:squirrel', 'squirrel': 'https://emoji.example/squirrel.png'}
 
 calls: list[tuple[str, dict, str]] = []
+# auth.test の x-oauth-scopes (xoxp-test-b は lists:write が足りない)
+_manifest = json.load(open(__file__.rsplit('tests', 1)[0] + 'slack_app_manifest.json', encoding='utf-8'))['oauth_config']['scopes']
+SCOPES = {
+    'xoxp-test-a': ','.join(_manifest['user']),
+    'xoxp-test-b': ','.join(s for s in _manifest['user'] if s != 'lists:write'),
+    'xoxb-test-a': ','.join(_manifest['bot']),
+}
 state = {'posted': [], 'scheduled': {}, 'reactions': {}, 'uploads': {}, 'canvas_edits': [], 'lists_created': [], 'list_updates': [], 'ratelimit_once': True}
 BASE = {'url': ''}
 
@@ -320,6 +327,8 @@ async def app(scope, receive, send):
         status, data = handle(method, params, auth)
     out = json.dumps(data).encode()
     extra = [(b'retry-after', b'1')] if status == 429 else []
+    if method == 'auth.test' and auth:
+        extra.append((b'x-oauth-scopes', SCOPES.get(token, '').encode()))
     await respond(send, status, out, 'application/json', extra)
 
 

@@ -33,6 +33,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 
 CLIENTS_FILE = Path(os.environ.get('SLACK_MCP_CLIENTS_FILE', Path(__file__).resolve().parent / 'clients.json'))
 PUBLIC_BASE = os.environ.get('SLACK_MCP_PUBLIC_URL', 'https://swirhen.tv/slack_mcp/mcp').rstrip('/')
@@ -98,7 +99,11 @@ def connector_url(client: dict) -> str:
     return f'{PUBLIC_BASE}/{client["token"]}'
 
 
-# ---- 書き込み (CLI から使う) ----
+# ---- 書き込み (CLI と管理画面から使う。値が正しくなければ ValueError、ない id は KeyError) ----
+_write_lock = threading.Lock()
+OPTION_KEYS = ('name', 'icon_emoji', 'icon_url', 'post_as', 'accounts', 'read_only', 'allow_as_user')
+
+
 def _read_raw() -> list[dict]:
     try:
         data = json.loads(CLIENTS_FILE.read_text(encoding='utf-8'))
@@ -115,29 +120,103 @@ def _write_raw(clients: list[dict]) -> None:
     os.replace(temporary, CLIENTS_FILE)
 
 
-def _apply_options(entry: dict, args) -> None:
-    if args.name is not None:
-        entry['name'] = args.name
-    if args.icon_emoji is not None:
-        if args.icon_emoji and not EMOJI_RE.fullmatch(args.icon_emoji):
-            sys.exit('--icon-emoji は :robot_face: のようにコロンで囲む')
-        entry['icon_emoji'] = args.icon_emoji or None
-        if args.icon_emoji:
+def _apply_options(entry: dict, options: dict) -> None:
+    """options の None でない項目を entry に書く (検証つき)"""
+    unknown = set(options) - set(OPTION_KEYS)
+    if unknown:
+        raise ValueError(f'知らない項目: {", ".join(sorted(unknown))}')
+    if options.get('name') is not None:
+        name = str(options['name']).strip()
+        if not name or len(name) > 80:
+            raise ValueError('表示名は 1〜80 文字')
+        entry['name'] = name
+    if options.get('icon_emoji') is not None:
+        emoji = str(options['icon_emoji']).strip()
+        if emoji and not emoji.startswith(':'):
+            emoji = f':{emoji.strip(":")}:'
+        if emoji and not EMOJI_RE.fullmatch(emoji):
+            raise ValueError('アイコンの絵文字は :robot_face: のような名前にする')
+        entry['icon_emoji'] = emoji or None
+        if emoji:
             entry['icon_url'] = None
-    if args.icon_url is not None:
-        entry['icon_url'] = args.icon_url or None
-        if args.icon_url:
+    if options.get('icon_url') is not None:
+        url = str(options['icon_url']).strip()
+        if url and not re.fullmatch(r'https://\S+', url):
+            raise ValueError('アイコンの URL は https:// で始める')
+        entry['icon_url'] = url or None
+        if url:
             entry['icon_emoji'] = None
-    if args.post_as is not None:
-        entry['post_as'] = args.post_as
-    if args.accounts is not None:
-        entry['accounts'] = [a.strip() for a in args.accounts.split(',') if a.strip()]
-    if args.read_only is not None:
-        entry['read_only'] = args.read_only
-    if args.allow_as_user is not None:
-        entry['allow_as_user'] = args.allow_as_user
+    if options.get('post_as') is not None:
+        if options['post_as'] not in POST_AS:
+            raise ValueError('投稿方法は bot か user')
+        entry['post_as'] = options['post_as']
+    if options.get('accounts') is not None:
+        accounts = options['accounts']
+        if isinstance(accounts, str):
+            accounts = accounts.split(',')
+        entry['accounts'] = [str(a).strip() for a in accounts if str(a).strip()]
+    for key in ('read_only', 'allow_as_user'):
+        if options.get(key) is not None:
+            entry[key] = bool(options[key])
 
 
+def client_view(c: dict) -> dict:
+    """管理画面・CLI に見せる形 (URL つき)"""
+    out = _normalize(c) or dict(c)
+    out['url'] = connector_url(out)
+    return out
+
+
+def create_client(cid: str, token: str | None = None, **options) -> dict:
+    if not ID_RE.fullmatch(cid or ''):
+        raise ValueError('id は英小文字・数字・ハイフン・アンダースコアで 32 文字まで')
+    if token is not None and not TOKEN_RE.fullmatch(token):
+        raise ValueError('引き継ぐトークンの形が違う (64 桁の 16 進数)')
+    with _write_lock:
+        raw = _read_raw()
+        if any(c.get('id') == cid for c in raw):
+            raise ValueError(f'{cid} はすでにある')
+        token = token or secrets.token_hex(32)
+        if any(c.get('token') == token for c in raw):
+            raise ValueError('そのトークンはほかの AI が使っている')
+        entry = {'id': cid, 'token': token, 'name': cid, 'post_as': 'bot',
+                 'created_at': datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
+        _apply_options(entry, options)
+        raw.append(entry)
+        _write_raw(raw)
+    return client_view(entry)
+
+
+def _change(cid: str, change) -> dict:
+    with _write_lock:
+        raw = _read_raw()
+        entry = next((c for c in raw if c.get('id') == cid), None)
+        if entry is None:
+            raise KeyError(cid)
+        change(entry)
+        _write_raw(raw)
+    return client_view(entry)
+
+
+def update_client(cid: str, **options) -> dict:
+    return _change(cid, lambda entry: _apply_options(entry, options))
+
+
+def regenerate_client(cid: str) -> dict:
+    """トークンを作り直す。前の URL はすぐ使えなくなる"""
+    return _change(cid, lambda entry: entry.update(token=secrets.token_hex(32)))
+
+
+def remove_client(cid: str) -> None:
+    with _write_lock:
+        raw = _read_raw()
+        rest = [c for c in raw if c.get('id') != cid]
+        if len(rest) == len(raw):
+            raise KeyError(cid)
+        _write_raw(rest)
+
+
+# ---- CLI ----
 def _describe(c: dict) -> str:
     icon = c.get('icon_emoji') or (c.get('icon_url') and 'icon_url') or '-'
     flags = [c['post_as']]
@@ -171,8 +250,6 @@ def main(argv=None) -> None:
         sub.add_parser(name).add_argument('id')
     args = parser.parse_args(argv)
 
-    raw = _read_raw()
-    index = {c.get('id'): i for i, c in enumerate(raw)}
     if args.command == 'list':
         clients = load_clients()
         if not clients:
@@ -180,43 +257,29 @@ def main(argv=None) -> None:
         for c in clients:
             print(_describe(c))
         return
-    if not ID_RE.fullmatch(args.id):
-        sys.exit('id は英小文字・数字・ハイフン・アンダースコアで 32 文字まで')
-    if args.command == 'add':
-        if args.id in index:
-            sys.exit(f'{args.id} はすでにある (変えるなら set)')
-        token = secrets.token_hex(32)
-        if args.token_file:
-            token = Path(args.token_file).read_text(encoding='ascii').strip()
-            if not TOKEN_RE.fullmatch(token):
-                sys.exit(f'{args.token_file} のトークンの形が違う')
-            if any(c.get('token') == token for c in raw):
-                sys.exit('そのトークンはほかの AI が使っている')
-        entry = {'id': args.id, 'token': token, 'name': args.id, 'post_as': 'bot',
-                 'created_at': datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
-        _apply_options(entry, args)
-        raw.append(entry)
-        _write_raw(raw)
-        print(_describe(_normalize(entry) or entry))
-        print(f'コネクタの URL: {PUBLIC_BASE}/{token}')
-        return
-    if args.id not in index:
+    options = {k: getattr(args, k, None) for k in OPTION_KEYS}
+    try:
+        if args.command == 'add':
+            token = Path(args.token_file).read_text(encoding='ascii').strip() if args.token_file else None
+            c = create_client(args.id, token=token, **options)
+            print(_describe(c))
+            print(f'コネクタの URL: {c["url"]}')
+        elif args.command == 'set':
+            print(_describe(update_client(args.id, **options)))
+        elif args.command == 'url':
+            c = find_by_id(args.id)
+            if c is None:
+                raise KeyError(args.id)
+            print(connector_url(c))
+        elif args.command == 'regenerate':
+            print(f'トークンを作り直した。新しいコネクタの URL: {regenerate_client(args.id)["url"]}')
+        elif args.command == 'remove':
+            remove_client(args.id)
+            print(f'{args.id} を消した (その URL はすぐ使えなくなる)')
+    except KeyError:
         sys.exit(f'{args.id} は登録されていない (python clients.py list)')
-    entry = raw[index[args.id]]
-    if args.command == 'set':
-        _apply_options(entry, args)
-        _write_raw(raw)
-        print(_describe(_normalize(entry) or entry))
-    elif args.command == 'url':
-        print(f'{PUBLIC_BASE}/{entry["token"]}')
-    elif args.command == 'regenerate':
-        entry['token'] = secrets.token_hex(32)
-        _write_raw(raw)
-        print(f'トークンを作り直した。新しいコネクタの URL: {PUBLIC_BASE}/{entry["token"]}')
-    elif args.command == 'remove':
-        raw.pop(index[args.id])
-        _write_raw(raw)
-        print(f'{args.id} を消した (その URL はすぐ使えなくなる)')
+    except ValueError as e:
+        sys.exit(str(e))
 
 
 if __name__ == '__main__':

@@ -33,14 +33,20 @@ class SlackError(Exception):
         super().__init__(f'{error}: {detail}' if detail else error)
 
 
-_client: httpx.AsyncClient | None = None
+_clients: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
 
 
 def http() -> httpx.AsyncClient:
-    global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True)
-    return _client
+    """イベントループごとの HTTP クライアント (接続はループをまたいで使えないため)"""
+    loop = asyncio.get_running_loop()
+    for key, (other, _) in list(_clients.items()):
+        if other.is_closed():
+            del _clients[key]
+    entry = _clients.get(id(loop))
+    if entry is None or entry[0] is not loop or entry[1].is_closed:
+        entry = (loop, httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True))
+        _clients[id(loop)] = entry
+    return entry[1]
 
 
 def _encode(params: dict[str, Any]) -> dict[str, str]:
@@ -145,3 +151,19 @@ async def paginate(token: str, method: str, key: str, max_pages: int = 20, **par
         cursor = body.get('response_metadata', {}).get('next_cursor') or None
         if not cursor:
             return
+
+
+async def auth_test(token: str) -> tuple[dict, list[str]]:
+    """auth.test を呼び、(応答, このトークンに付いているスコープ) を返す。スコープは x-oauth-scopes ヘッダーから読む"""
+    try:
+        res = await http().post(f'{API_BASE}/auth.test', headers={'Authorization': f'Bearer {token}'})
+    except httpx.HTTPError as e:
+        raise SlackError('network_error', f'Slack API に接続できない ({type(e).__name__}: {e})') from e
+    try:
+        body = res.json()
+    except ValueError as e:
+        raise SlackError('invalid_response', f'Slack API が HTTP {res.status_code} を返した') from e
+    if not body.get('ok'):
+        raise SlackError(body.get('error', 'unknown_error'), None, body)
+    scopes = [s.strip() for s in res.headers.get('x-oauth-scopes', '').split(',') if s.strip()]
+    return body, scopes
