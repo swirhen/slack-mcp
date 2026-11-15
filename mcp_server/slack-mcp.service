@@ -1,0 +1,17 @@
+[Unit]
+Description=slack-mcp (複数の Slack アカウントを扱う MCP サーバー)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=swirhen
+Group=swirhen
+WorkingDirectory=/home/swirhen/slack-mcp
+ExecStart=/home/swirhen/slack-mcp/.venv/bin/python mcp_server/server.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# Slack のユーザートークンを含む設定 (アカウントごと)
+accounts/
+# MCP サーバーのコネクタ URL のトークン
+mcp_token
+__pycache__/
+*.tmp
+*.log
+logs/
