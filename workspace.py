@@ -39,6 +39,7 @@ class Workspace:
     def __init__(self, name: str):
         self.name = name
         self._auth: tuple[float, dict] | None = None
+        self._bot_auth: tuple[float, dict] | None = None
         self._users: dict[str, tuple[float, dict | None]] = {}
         self._user_list: tuple[float, list[dict]] | None = None
         self._channel_lists: dict[str, tuple[float, list[dict]]] = {}
@@ -53,6 +54,10 @@ class Workspace:
     @property
     def token(self) -> str:
         return self.config['user_token']
+
+    @property
+    def bot_token(self) -> str | None:
+        return self.config['bot_token']
 
     @property
     def read_only(self) -> bool:
@@ -75,6 +80,20 @@ class Workspace:
             info = {'user_id': body.get('user_id'), 'user': body.get('user'), 'team_id': body.get('team_id'),
                     'team': body.get('team'), 'url': (body.get('url') or '').rstrip('/') + '/'}
             self._auth = (time.time() + AUTH_TTL, info)
+            return info
+
+    async def bot_auth(self) -> dict | None:
+        """bot トークンの auth.test の結果 ({'bot_id', 'user_id', 'user'})。bot_token がなければ None。1 時間覚えておく"""
+        token = self.bot_token
+        if not token:
+            return None
+        if self._bot_auth and self._bot_auth[0] > time.time() and self._bot_auth[1]['token'] == token:
+            return self._bot_auth[1]
+        async with self._lock('bot_auth'):
+            body = await api.call(token, 'auth.test')
+            info = {'token': token, 'bot_id': body.get('bot_id'), 'user_id': body.get('user_id'), 'user': body.get('user'),
+                    'team_id': body.get('team_id')}
+            self._bot_auth = (time.time() + AUTH_TTL, info)
             return info
 
     # ---- ユーザー ----
@@ -232,7 +251,7 @@ class Workspace:
         if m.get('user'):
             out['user'] = {'id': m['user'], 'name': user_label(users.get(m['user'])) or m.get('username') or m['user']}
         elif m.get('bot_id') or m.get('username'):
-            out['bot'] = {'id': m.get('bot_id'), 'name': (m.get('bot_profile') or {}).get('name') or m.get('username')}
+            out['bot'] = {'id': m.get('bot_id'), 'name': m.get('username') or (m.get('bot_profile') or {}).get('name')}
         text = await self.render_text(m.get('text'), users)
         out['text'] = text[:300] + '…' if concise and len(text) > 300 else text
         if m.get('subtype'):

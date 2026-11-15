@@ -3,6 +3,9 @@
 複数の Slack アカウント (ログインのメールアドレスごと・ワークスペースごと) を、1 つの MCP コネクタで扱うサーバー。
 claude.ai の Slack コネクタは 1 つしか持てないので、その代わりに自宅サーバーで動かし、同じようなツールを提供する。
 
+AI (claude.ai・ChatGPT など) ごとに別のコネクタ URL を発行し、投稿は AI ごとの名前・アイコンの bot として行う。
+読み取り (履歴・検索など) は持ち主本人の権限で行う。
+
 - リポジトリ: `swirhen/slack-mcp` (非公開)
 - 本番の配置先: `/home/swirhen/slack-mcp`
 - 公開 URL: Apache 配下の `/slack_mcp/mcp/<トークン>` (`127.0.0.1:8009` へ転送)
@@ -12,11 +15,11 @@ claude.ai の Slack コネクタは 1 つしか持てないので、その代わ
 ## 全体像
 
 ```
- claude.ai など ──▶ https://swirhen.tv/slack_mcp/mcp/<トークン> ──▶ Apache ──▶ mcp_server/server.py (127.0.0.1:8009)
-                                                                                  │ systemd: slack-mcp.service
-                                                                                  ├─ accounts/personal.toml  (xoxp-…)  ──▶ ワークスペース A (本人として)
-                                                                                  ├─ accounts/work.toml      (xoxp-…)  ──▶ ワークスペース B
-                                                                                  └─ accounts/<名前>.toml    (xoxp-…)  ──▶ …
+ claude.ai ─▶ /slack_mcp/mcp/<claude のトークン>  ─┐                          clients.json (AI ごとの名前・アイコン・投稿方法)
+ ChatGPT   ─▶ /slack_mcp/mcp/<chatgpt のトークン> ─┼─▶ Apache ─▶ mcp_server/server.py (127.0.0.1:8009, slack-mcp.service)
+ …                                                ─┘                 │
+                                     accounts/<アカウント>.toml ───────┤ 読む: user_token (xoxp・持ち主本人)
+                                                                     └ 投稿: bot_token (xoxb) + AI ごとの表示名・アイコン
 ```
 
 | ファイル | 役割 |
@@ -25,7 +28,7 @@ claude.ai の Slack コネクタは 1 つしか持てないので、その代わ
 | `workspace.py` | アカウントごとの状態 (自分のユーザー ID・ユーザー名・チャンネル名のキャッシュ) と、Slack の応答の整形 |
 | `slack_client.py` | Slack Web API の薄いクライアント (レート制限の再試行、ファイルの送受信) |
 | `accounts.py` | `accounts/<アカウント名>.toml` の読み込み |
-| `mcp_token.py` | コネクタ URL のトークンの発行・確認 |
+| `clients.py` | AI ごとのコネクタ (URL のトークン・表示名・アイコン・投稿方法・使えるアカウント) の管理 |
 | `slack_app_manifest.json` | Slack アプリを作るときのマニフェスト (必要なスコープが入っている) |
 | `account.example.toml` | アカウントの設定ファイルの例 |
 | `tests/` | 偽の Slack API に対する通し試験 |
@@ -37,9 +40,10 @@ claude.ai の Slack コネクタは 1 つしか持てないので、その代わ
 アカウントごとに `accounts/<アカウント名>.toml` が 1 つ (Git 管理外。ユーザートークンを含む)。
 
 ```toml
-user_token = "xoxp-…"                    # Slack アプリの User OAuth Token
+user_token = "xoxp-…"                    # Slack アプリの User OAuth Token (読み取りと、本人として行う操作)
+bot_token = "xoxb-…"                     # 同じアプリの Bot User OAuth Token (AI が bot として投稿する)
 label = "個人用 (example@example.com)"   # 任意。一覧に出す説明
-read_only = false                        # 任意。true なら送信・変更系のツールを断る
+read_only = false                        # 任意。true なら送信・変更系のツールを断る (どの AI からでも)
 ```
 
 - アカウント名は英小文字・数字・ハイフン・アンダースコアで 32 文字まで。MCP の各ツールの `account` にこの名前を指定する (アカウントが 1 つだけなら省略できる)
@@ -52,12 +56,18 @@ read_only = false                        # 任意。true なら送信・変更�
 OAuth の画面やサーバー側の処理は要らない。
 
 1. そのワークスペースのアカウントで https://api.slack.com/apps を開き、**Create New App** → **From a manifest** を選ぶ
-2. ワークスペースを選び、`slack_app_manifest.json` の中身を貼り付けて作る (ユーザースコープが一式入る)
+2. ワークスペースを選び、`slack_app_manifest.json` の中身を貼り付けて作る (ユーザーと bot のスコープが一式入る)
 3. 左の **OAuth & Permissions** → **Install to Workspace** で自分のアカウントとして許可する
    (管理者の承認が要るワークスペースでは、承認されるまで待つ)
-4. 同じページの **User OAuth Token** (`xoxp-` で始まる) を `accounts/<アカウント名>.toml` の `user_token` に書く
+4. 同じページの **User OAuth Token** (`xoxp-`) を `user_token` に、**Bot User OAuth Token** (`xoxb-`) を `bot_token` に書く
 
-スコープを足したいときは、アプリの **OAuth & Permissions** でスコープを足して **Reinstall** すると新しいトークンになる (ファイルも書き換える)。
+すでにアプリを作ってあるときは、アプリの **App Manifest** に `slack_app_manifest.json` を貼り直して保存し、
+**Install App** → **Reinstall to Workspace** する。bot のトークンが出るので `bot_token` に足す (`user_token` が変わっていたらそれも書き換える)。
+
+- bot の名前は、投稿するときに AI ごとの表示名 (`clients.json` の `name`) に置き換わる。アプリの bot の名前 (マニフェストでは "AI") が出るのは、
+  予約送信とリアクション (Slack の API が表示名の上書きに対応していない) と、メンバー一覧など
+- bot は公開チャンネルにはそのまま投稿できる (`chat:write.public`)。プライベートチャンネルに投稿させたいときは、そのチャンネルで `/invite @アプリ名` する
+- bot は持ち主と他人の DM には投稿できない。人に送るときは bot からその人への DM になる
 
 > Slack のレート制限について: 2025 年 5 月以降に作った「Marketplace 外で配布するアプリ」は `conversations.history` / `conversations.replies` が
 > 1 分に 1 回・15 件に制限されるが、自分のワークスペース用に作って配布しない内部アプリは対象外 (従来どおり Tier 3)。
@@ -68,6 +78,38 @@ OAuth の画面やサーバー側の処理は要らない。
 ## ツール
 
 ツール名と引数は claude.ai の Slack コネクタに合わせてある (すべてに `account` が付く)。
+
+投稿系 (送信・予約・リアクション・ファイルの共有) は、コネクタの `post_as` が `bot` なら bot として、`user` なら本人として行う。
+Canvas・List の作成と編集、チャンネルの作成は本人の名前でしかできないので、`bot` のコネクタでは `allow_as_user` を付けたときだけ使える。
+
+---
+
+## AI ごとのコネクタ (`clients.py`)
+
+AI ごとに 1 つ、コネクタの URL (`/slack_mcp/mcp/<トークン>`) を発行する。設定は `clients.json` (Git 管理外・600)。
+追加・変更・作り直しは再起動しなくてもすぐ効く。
+
+```bash
+.venv/bin/python clients.py add claude --name Claude --icon-emoji :robot_face:      # URL が表示される
+.venv/bin/python clients.py add chatgpt --name ChatGPT --icon-url https://…/c.png --accounts swirhen
+.venv/bin/python clients.py set chatgpt --read-only        # 読み取りだけにする (--writable で戻す)
+.venv/bin/python clients.py set claude --allow-as-user     # Canvas・List などの本人としての操作も許す
+.venv/bin/python clients.py set owner --post-as user       # 本人として投稿する AI にする
+.venv/bin/python clients.py list
+.venv/bin/python clients.py url claude                     # URL を表示する
+.venv/bin/python clients.py regenerate claude              # トークンを作り直す (前の URL はすぐ使えなくなる)
+.venv/bin/python clients.py remove chatgpt
+```
+
+| 設定 | 意味 |
+| --- | --- |
+| `name` / `icon_emoji` / `icon_url` | bot として投稿するときの表示名とアイコン |
+| `post_as` | `bot` (既定) か `user` (本人として投稿) |
+| `accounts` | 使ってよいアカウント (空ならすべて) |
+| `read_only` | 読み取りだけ |
+| `allow_as_user` | bot のコネクタでも、Canvas・List の作成と編集・チャンネルの作成 (本人の名前で行われる) を許す |
+
+`bot` のコネクタで、そのアカウントに `bot_token` がないときは、本人として投稿し直したりせずにエラーにする。
 
 | 種類 | ツール |
 | --- | --- |
@@ -92,6 +134,7 @@ OAuth の画面やサーバー側の処理は要らない。
 - 下書き (`slack_send_message_draft`) は公開 API がないので無い。代わりに内容を持ち主に見せてから `slack_send_message` で送る
 - List の列の追加・削除は API にないので、`slack_update_list` は名前・説明・タスクモードだけ変えられる。List は有料プランのみ
 - ファイルのアップロードは 1 回のツール呼び出しで終わる (URL 取得 → 送信 → 完了をサーバーがまとめて行う)
+- AI ごとのコネクタと bot での投稿はこのサーバー独自。`slack_list_accounts` の `client` で、今のコネクタが bot か本人かが分かる
 
 ---
 
@@ -101,11 +144,12 @@ OAuth の画面やサーバー側の処理は要らない。
 python -m venv $env:USERPROFILE\.venv\slack-mcp
 & $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe -m pip install -r requirements.txt
 & $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe tests\smoke.py        # 偽の Slack に対する通し試験
-& $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe mcp_token.py --generate
+& $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe clients.py add local --name Local
 & $env:USERPROFILE\.venv\slack-mcp\Scripts\python.exe mcp_server\server.py   # http://127.0.0.1:8009/mcp/<トークン>
 ```
 
-環境変数: `SLACK_MCP_PORT` (既定 8009)、`SLACK_MCP_TOKEN_FILE`、`SLACK_MCP_ACCOUNTS_DIR`、`SLACK_MCP_TZ` (既定 Asia/Tokyo)、`SLACK_API_BASE` (テスト用)。
+環境変数: `SLACK_MCP_PORT` (既定 8009)、`SLACK_MCP_CLIENTS_FILE`、`SLACK_MCP_ACCOUNTS_DIR`、`SLACK_MCP_TZ` (既定 Asia/Tokyo)、
+`SLACK_MCP_PUBLIC_URL` (`clients.py` が表示する URL の先頭。既定 `https://swirhen.tv/slack_mcp/mcp`)、`SLACK_API_BASE` (テスト用)。
 
 ---
 
@@ -122,9 +166,9 @@ python3 -m venv .venv
 
 mkdir -p accounts && chmod 700 accounts
 cp account.example.toml accounts/personal.toml && chmod 600 accounts/personal.toml
-vi accounts/personal.toml                 # user_token を書く (アカウントの数だけ繰り返す)
+vi accounts/personal.toml                 # user_token・bot_token を書く (アカウントの数だけ繰り返す)
 
-.venv/bin/python mcp_token.py --generate  # コネクタの URL が表示される
+.venv/bin/python clients.py add claude --name Claude --icon-emoji :robot_face:   # コネクタの URL が表示される
 
 sudo cp mcp_server/slack-mcp.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -137,8 +181,16 @@ Apache は `dotfile/apache2/sites-available/000-default.conf` に `/slack_mcp/mc
 
 ### claude.ai への登録
 
-設定 → コネクタ → カスタムコネクタを追加 で、URL に `https://swirhen.tv/slack_mcp/mcp/<トークン>` を入れる (認証なし)。
-トークンを作り直したら (`python mcp_token.py --generate`)、コネクタの URL も変える。
+設定 → コネクタ → カスタムコネクタを追加 で、URL に `python clients.py url claude` の URL を入れる (認証なし)。
+ほかの AI も同じように、それぞれの id で `clients.py add` した URL を登録する。
+トークンを作り直したら (`python clients.py regenerate <id>`)、その AI のコネクタの URL も変える。
+
+### 古い版 (mcp_token の 1 つの URL) からの移行
+
+```bash
+.venv/bin/python clients.py add claude --name Claude --icon-emoji :robot_face: --token-file mcp_token   # 今の URL のまま引き継ぐ
+rm mcp_token
+```
 
 ### 更新
 
@@ -150,6 +202,7 @@ ssh prod-checker "cd /home/swirhen/slack-mcp && git pull --ff-only && sudo syste
 
 ## 安全のために
 
-- コネクタの URL はトークンそのもの。漏れたら `python mcp_token.py --generate` で作り直す (前の URL はすぐ使えなくなる)
-- ユーザートークンでの操作は、すべて本人の操作として相手に見える。信用しきれない AI には `read_only = true` のアカウントだけ渡す
-- `accounts/` と `mcp_token` は Git 管理外。サーバーの外に出さない
+- コネクタの URL はトークンそのもの。漏れたらその AI の分を `python clients.py regenerate <id>` で作り直す (前の URL はすぐ使えなくなる)
+- 読み取りは持ち主の権限なので、AI はプライベートチャンネルや DM も読める。信用しきれない AI には `--accounts` で使えるアカウントを絞り、`--read-only` にする
+- 接続元の AI は URL のトークンだけで決まる (サーバーが入口でヘッダーを付け直すので、外から偽れない)
+- `accounts/` と `clients.json` は Git 管理外。サーバーの外に出さない

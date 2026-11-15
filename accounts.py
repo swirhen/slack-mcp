@@ -18,7 +18,8 @@ else:  # 本番は Ubuntu 22.04 の Python 3.10
 
 ACCOUNTS_DIR = Path(os.environ.get('SLACK_MCP_ACCOUNTS_DIR', Path(__file__).resolve().parent / 'accounts'))
 NAME_RE = re.compile(r'^[a-z0-9_-]{1,32}$')
-TOKEN_RE = re.compile(r'^xox[pbe]-[A-Za-z0-9-]+$')
+TOKEN_RE = re.compile(r'^xoxp-[A-Za-z0-9-]+$')
+BOT_TOKEN_RE = re.compile(r'^xoxb-[A-Za-z0-9-]+$')
 
 _cache: dict[str, tuple[tuple, dict]] = {}
 
@@ -43,7 +44,7 @@ def list_accounts() -> list[str]:
 
 
 def read_account(name: str) -> dict:
-    """アカウントの設定を返す ({'name', 'user_token', 'label', 'read_only'})。ファイルが変わったときだけ読み直す"""
+    """アカウントの設定を返す ({'name', 'user_token', 'bot_token', 'label', 'read_only'})。ファイルが変わったときだけ読み直す"""
     path = account_path(name)
     try:
         st = path.stat()
@@ -61,9 +62,13 @@ def read_account(name: str) -> dict:
     token = str(data.get('user_token', '')).strip()
     if not TOKEN_RE.fullmatch(token):
         raise AccountError(f'アカウント「{name}」の user_token が未設定か形が違う (xoxp- で始まるトークンを書く)')
+    bot_token = str(data.get('bot_token', '') or '').strip()
+    if bot_token and not BOT_TOKEN_RE.fullmatch(bot_token):
+        raise AccountError(f'アカウント「{name}」の bot_token の形が違う (xoxb- で始まる Bot User OAuth Token を書く)')
     config = {
         'name': name,
         'user_token': token,
+        'bot_token': bot_token or None,
         'label': str(data.get('label', '') or ''),
         'read_only': bool(data.get('read_only', False)),
     }

@@ -1,8 +1,10 @@
 # Slack のユーザートークンを含む設定 (アカウントごと)
 accounts/
-# MCP サーバーのコネクタ URL のトークン
+# 古い版のコネクタ URL のトークン (clients.json に移した)
 mcp_token
 __pycache__/
 *.tmp
 *.log
 logs/
+# AI ごとのコネクタの設定 (URL のトークンを含む)
+clients.json

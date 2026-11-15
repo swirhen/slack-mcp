@@ -21,16 +21,23 @@ logging.basicConfig(level=logging.WARNING)
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SLACK_PORT = 18099
 MCP_PORT = 18009
-TOKEN = 'ab' * 32
+TOKEN = 'ab' * 32        # 持ち主本人として投稿する AI (owner)
+BOT_TOKEN = 'cd' * 32    # bot「Claude」として投稿する AI (claude)
+READER_TOKEN = '12' * 32  # team-a だけ・読み取り専用の AI (reader)
 
 tmp = pathlib.Path(tempfile.mkdtemp(prefix='slack-mcp-test-'))
 (tmp / 'accounts').mkdir()
-(tmp / 'accounts' / 'team-a.toml').write_text('user_token = "xoxp-test-a"\nlabel = "チーム A"\n', encoding='utf-8')
+(tmp / 'accounts' / 'team-a.toml').write_text('user_token = "xoxp-test-a"\nbot_token = "xoxb-test-a"\nlabel = "チーム A"\n', encoding='utf-8')
 (tmp / 'accounts' / 'team-b.toml').write_text('user_token = "xoxp-test-b"\nread_only = true\n', encoding='utf-8')
-(tmp / 'mcp_token').write_text(TOKEN + '\n', encoding='ascii')
+(tmp / 'clients.json').write_text(json.dumps({'clients': [
+    {'id': 'owner', 'token': TOKEN, 'name': 'Owner', 'post_as': 'user'},
+    {'id': 'claude', 'token': BOT_TOKEN, 'name': 'Claude', 'icon_emoji': ':robot_face:', 'post_as': 'bot'},
+    {'id': 'reader', 'token': READER_TOKEN, 'name': 'Reader', 'post_as': 'bot', 'accounts': ['team-a'], 'read_only': True},
+    {'id': 'broken', 'token': 'zz'},
+]}), encoding='utf-8')
 os.environ['SLACK_API_BASE'] = f'http://127.0.0.1:{SLACK_PORT}/api'
 os.environ['SLACK_MCP_ACCOUNTS_DIR'] = str(tmp / 'accounts')
-os.environ['SLACK_MCP_TOKEN_FILE'] = str(tmp / 'mcp_token')
+os.environ['SLACK_MCP_CLIENTS_FILE'] = str(tmp / 'clients.json')
 os.environ['SLACK_MCP_PORT'] = str(MCP_PORT)
 
 sys.path.insert(0, str(ROOT))
@@ -40,6 +47,7 @@ import fake_slack  # noqa: E402
 import server  # noqa: E402
 from mcp.client.session import ClientSession  # noqa: E402
 from mcp.client.streamable_http import streamable_http_client  # noqa: E402
+from mcp.shared._httpx_utils import create_mcp_http_client  # noqa: E402
 from mcp.types import ImageContent, TextContent  # noqa: E402
 
 fake_slack.BASE['url'] = f'http://127.0.0.1:{SLACK_PORT}'
@@ -80,6 +88,7 @@ async def run_tests():
             names = {a['name']: a for a in r['accounts']}
             check('accounts: 2 accounts with team info', set(names) == {'team-a', 'team-b'} and names['team-a']['team'] == 'Team A' and names['team-a']['user_id'] == 'U0A1', r)
             check('accounts: read_only flag', names['team-b']['read_only'] is True)
+            check('accounts: client info (owner)', r['client']['id'] == 'owner' and r['client']['post_as'] == 'user' and 'bot' not in names['team-a'], r['client'])
             r = await call(session, 'slack_read_user_profile')
             check('account required when several', 'account' in r.get('error', ''), r)
 
@@ -143,6 +152,7 @@ async def run_tests():
             posted = fake_slack.state['posted'][-1]
             check('send: markdown_text + thread', posted.get('markdown_text') == '**hi** there' and posted.get('thread_ts') == '1700000100.000100'
                   and posted.get('reply_broadcast') == 'true' and 'text' not in posted, posted)
+            check('send (owner): as user, no username', posted['as_bot'] is False and 'username' not in posted and r['posted_as'] == '持ち主本人', (posted, r))
             check('send: permalink returned', r['permalink'].startswith('https://team-a.slack.com/archives/C0A1/p'), r)
             r = await call(session, 'slack_send_message', account='team-b', channel_id='C0B1', message='x')
             check('send: read_only account refused', 'read_only' in r.get('error', ''), r)
@@ -253,13 +263,95 @@ async def run_tests():
             r = await call(session, 'slack_list_accounts')
             check('accounts: error shown per account', any(a['name'] == 'team-c' and 'error' in a for a in r['accounts']), r)
 
+    await bot_tests()
+    await reader_tests()
+
     # 間違ったコネクタ URL は 404
     import httpx
     async with httpx.AsyncClient() as c:
-        res = await c.post(f'http://127.0.0.1:{MCP_PORT}/mcp/{"cd" * 32}', json={})
+        res = await c.post(f'http://127.0.0.1:{MCP_PORT}/mcp/{"ef" * 32}', json={})
         check('wrong token -> 404', res.status_code == 404, res.status_code)
         res = await c.post(f'http://127.0.0.1:{MCP_PORT}/mcp', json={})
         check('no token -> 404', res.status_code == 404, res.status_code)
+
+
+async def bot_tests():
+    """bot「Claude」として投稿する AI のコネクタ"""
+    print('  -- bot (claude) --')
+    async with streamable_http_client(f'http://127.0.0.1:{MCP_PORT}/mcp/{BOT_TOKEN}') as (read, write, *_):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            r = await call(session, 'slack_list_accounts')
+            names = {a['name']: a for a in r['accounts']}
+            check('bot: client info', r['client'] == {**r['client'], 'id': 'claude', 'post_as': 'bot', 'bot_name': 'Claude'}, r['client'])
+            check('bot: bot user per account', names['team-a']['bot'] == {'user_id': 'U0ABOT', 'user': 'ai_bot'} and 'error' in names['team-b']['bot'], names)
+
+            r = await call(session, 'slack_send_message', account='team-a', channel_id='#general', message='bot です')
+            posted = fake_slack.state['posted'][-1]
+            check('bot send: bot token + name + icon', posted['as_bot'] is True and posted['username'] == 'Claude'
+                  and posted['icon_emoji'] == ':robot_face:' and posted['channel'] == 'C0A1' and r['posted_as'] == 'bot「Claude」', (posted, r))
+            token_of_post = [t for m, _, t in fake_slack.calls if m == 'chat.postMessage'][-1]
+            check('bot send: sent with xoxb', token_of_post == 'xoxb-test-a', token_of_post)
+            r = await call(session, 'slack_send_message', account='team-a', channel_id='U0A2', message='DM')
+            check('bot send: user id -> bot DM', fake_slack.state['posted'][-1]['channel'] == 'D0ABOT' and r['channel_id'] == 'D0ABOT', r)
+            r = await call(session, 'slack_send_message', account='team-a', channel_id='D0A1', message='x')
+            check('bot send: owner DM refused with bot hint', '持ち主と他人の DM' in r.get('error', ''), r)
+            r = await call(session, 'slack_send_message', account='team-a', channel_id='G0A1', message='x')
+            check('bot send: private not invited hint', '/invite' in r.get('error', ''), r)
+
+            (tmp / 'accounts' / 'team-d.toml').write_text('user_token = "xoxp-test-b"\n', encoding='utf-8')
+            r = await call(session, 'slack_send_message', account='team-d', channel_id='C0B1', message='x')
+            check('bot send: no bot_token refused (no fallback to user)', 'bot_token がない' in r.get('error', ''), r)
+            (tmp / 'accounts' / 'team-d.toml').unlink()
+
+            r = await call(session, 'slack_schedule_message', account='team-a', channel_id='C0A1', message='later', post_at='2030-01-02T09:00')
+            sid = r.get('scheduled_message_id')
+            check('bot schedule: as bot with note', fake_slack.state['scheduled'][sid]['as_bot'] is True and 'アプリの名前' in r.get('note', ''), r)
+            r = await call(session, 'slack_list_scheduled_messages', account='team-a')
+            check('bot schedule: list shows bot schedules', [m['scheduled_message_id'] for m in r['scheduled_messages']] == [sid], r)
+            r = await call(session, 'slack_cancel_scheduled_message', account='team-a', channel_id='C0A1', scheduled_message_id=sid)
+            check('bot schedule: cancel with bot token', r.get('ok') is True and sid not in fake_slack.state['scheduled'], r)
+
+            r = await call(session, 'slack_add_reaction', account='team-a', channel_id='C0A1', message_ts='1700000100.000100', emoji='eyes')
+            check('bot reaction: by bot', ('C0A1', '1700000100.000100', 'eyes', True) in fake_slack.state['reactions'] and r['posted_as'] == 'bot「Claude」', r)
+
+            r = await call(session, 'slack_upload_file', account='team-a', filename='a.txt', content='a')
+            check('bot upload: channel required', 'channel_id が要る' in r.get('error', ''), r)
+            r = await call(session, 'slack_upload_file', account='team-a', filename='b.txt', content='bb', channel_id='C0A1')
+            up = fake_slack.state['uploads'][r['file_id']]
+            check('bot upload: bot token + name', up['as_bot'] is True and up['username'] == 'Claude' and up['icon_emoji'] == ':robot_face:', up)
+
+            r = await call(session, 'slack_create_canvas', account='team-a', title='t', content='c')
+            check('bot: owner-only op refused (canvas)', '持ち主本人の名前' in r.get('error', ''), r)
+            r = await call(session, 'slack_create_conversation', account='team-a', user_ids=['U0A2'])
+            check('bot: owner-only op refused (conversation)', '持ち主本人の名前' in r.get('error', ''), r)
+
+            r = await call(session, 'slack_read_channel', account='team-a', channel_id='C0A2')
+            check('bot: reads with user token, bot name shown', r['messages'][0]['bot']['name'] == 'Claude', r['messages'])
+
+    # 外から接続元のヘッダーを偽っても、URL のトークンの AI になる
+    client = create_mcp_http_client(headers={'x-slack-mcp-client': 'claude'})
+    async with client, streamable_http_client(f'http://127.0.0.1:{MCP_PORT}/mcp/{TOKEN}', http_client=client) as (read, write, *_):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            r = await call(session, 'slack_list_accounts')
+            check('spoofed client header ignored', r['client']['id'] == 'owner', r['client'])
+
+
+async def reader_tests():
+    """team-a だけ・読み取り専用の AI のコネクタ"""
+    print('  -- reader --')
+    async with streamable_http_client(f'http://127.0.0.1:{MCP_PORT}/mcp/{READER_TOKEN}') as (read, write, *_):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            r = await call(session, 'slack_list_accounts')
+            check('reader: only allowed accounts', [a['name'] for a in r['accounts']] == ['team-a'], r)
+            r = await call(session, 'slack_read_user_profile')
+            check('reader: single allowed account is default', r.get('id') == 'U0A1', r)
+            r = await call(session, 'slack_read_user_profile', account='team-b')
+            check('reader: other account refused', '使えない設定' in r.get('error', ''), r)
+            r = await call(session, 'slack_send_message', account='team-a', channel_id='C0A1', message='x')
+            check('reader: read only', 'コネクタ (reader) は読み取り専用' in r.get('error', ''), r)
 
 
 async def main():

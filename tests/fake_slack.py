@@ -10,6 +10,7 @@ from urllib.parse import parse_qs
 TOKENS = {
     'xoxp-test-a': {'user_id': 'U0A1', 'user': 'alice', 'team_id': 'T0A', 'team': 'Team A', 'url': 'https://team-a.slack.com/'},
     'xoxp-test-b': {'user_id': 'U0B1', 'user': 'bob', 'team_id': 'T0B', 'team': 'Team B', 'url': 'https://team-b.slack.com/'},
+    'xoxb-test-a': {'user_id': 'U0ABOT', 'user': 'ai_bot', 'bot_id': 'B0A', 'team_id': 'T0A', 'team': 'Team A', 'url': 'https://team-a.slack.com/'},
 }
 
 USERS = {
@@ -37,6 +38,9 @@ MESSAGES = {
          'files': [{'id': 'F0A1', 'name': 'memo.txt', 'title': 'memo', 'mimetype': 'text/plain', 'filetype': 'text', 'size': 20}]},
         {'type': 'message', 'user': 'U0A1', 'text': 'おはよう &amp; よろしく', 'ts': '1700000050.000050'},
         {'type': 'message', 'subtype': 'bot_message', 'bot_id': 'B01', 'username': 'alertbot', 'text': 'alert!', 'ts': '1700000010.000010'},
+    ],
+    'C0A2': [
+        {'type': 'message', 'bot_id': 'B0A', 'username': 'Claude', 'bot_profile': {'name': 'AI'}, 'text': 'bot から', 'ts': '1700000900.000900'},
     ],
     'D0A1': [{'type': 'message', 'user': 'U0A2', 'text': 'DM です', 'ts': '1700000500.000500'}],
     'C0B1': [{'type': 'message', 'user': 'U0B1', 'text': 'team b', 'ts': '1700000700.000700'}],
@@ -86,7 +90,7 @@ LIST_ITEMS = [
 ]
 EMOJI = {'partyparrot': 'https://emoji.example/partyparrot.gif', 'shipit': 'alias:squirrel', 'squirrel': 'https://emoji.example/squirrel.png'}
 
-calls: list[tuple[str, dict]] = []
+calls: list[tuple[str, dict, str]] = []
 state = {'posted': [], 'scheduled': {}, 'reactions': {}, 'uploads': {}, 'canvas_edits': [], 'lists_created': [], 'list_updates': [], 'ratelimit_once': True}
 BASE = {'url': ''}
 
@@ -109,6 +113,7 @@ def paginated(items, params, key):
 
 def handle(method: str, params: dict, auth: dict):
     team = auth['team_id']
+    is_bot = 'bot_id' in auth
     if method == 'auth.test':
         return ok(**auth)
     if method == 'users.info':
@@ -159,7 +164,7 @@ def handle(method: str, params: dict, auth: dict):
     if method == 'conversations.open':
         users = params.get('users', '').split(',')
         if users == ['U0A2']:
-            return ok(channel={'id': 'D0A1'})
+            return ok(channel={'id': 'D0ABOT' if is_bot else 'D0A1'})
         return ok(channel={'id': 'G0NEW'})
     if method == 'conversations.create':
         if params.get('name') == 'general':
@@ -185,21 +190,35 @@ def handle(method: str, params: dict, auth: dict):
             return err('markdown_text_conflict')
         if params.get('channel') == 'C0A3':
             return err('is_archived')
+        if is_bot and params.get('channel') == 'D0A1':  # 持ち主と他人の DM は bot から見えない
+            return err('channel_not_found')
+        if is_bot and params.get('channel') == 'G0A1':  # 招待されていないプライベートチャンネル
+            return err('not_in_channel')
+        if not is_bot and 'username' in params:
+            return err('invalid_arguments')
         ts = f'{time.time():.6f}'
-        state['posted'].append({**params, 'ts': ts})
+        state['posted'].append({**params, 'ts': ts, 'as_bot': is_bot})
         return ok(channel=params['channel'], ts=ts, message={'text': params.get('markdown_text')})
     if method == 'chat.getPermalink':
         return ok(permalink=f'https://team-a.slack.com/archives/{params["channel"]}/p{params["message_ts"].replace(".", "")}')
     if method == 'chat.scheduleMessage':
         sid = f'Q{len(state["scheduled"]) + 1}'
-        state['scheduled'][sid] = {'id': sid, 'channel_id': params['channel'], 'post_at': int(params['post_at']), 'text': params.get('markdown_text')}
+        if 'username' in params:
+            return err('invalid_arguments')
+        state['scheduled'][sid] = {'id': sid, 'channel_id': params['channel'], 'post_at': int(params['post_at']), 'text': params.get('markdown_text'),
+                                   'as_bot': is_bot}
         return ok(scheduled_message_id=sid, channel=params['channel'], post_at=int(params['post_at']))
     if method == 'chat.scheduledMessages.list':
-        return ok(scheduled_messages=list(state['scheduled'].values()), response_metadata={'next_cursor': ''})
+        mine = [{k: v for k, v in m.items() if k != 'as_bot'} for m in state['scheduled'].values() if m['as_bot'] == is_bot]
+        return ok(scheduled_messages=mine, response_metadata={'next_cursor': ''})
     if method == 'chat.deleteScheduledMessage':
-        return ok() if state['scheduled'].pop(params.get('scheduled_message_id'), None) else err('invalid_scheduled_message_id')
+        m = state['scheduled'].get(params.get('scheduled_message_id'))
+        if not m or m['as_bot'] != is_bot:
+            return err('invalid_scheduled_message_id')
+        del state['scheduled'][params['scheduled_message_id']]
+        return ok()
     if method == 'reactions.add':
-        key = (params['channel'], params['timestamp'], params['name'])
+        key = (params['channel'], params['timestamp'], params['name'], is_bot)
         if key in state['reactions']:
             return err('already_reacted')
         state['reactions'][key] = True
@@ -210,14 +229,15 @@ def handle(method: str, params: dict, auth: dict):
         f = FILES.get(params.get('file')) or state['uploads'].get(params.get('file'))
         if not f:
             return err('file_not_found')
-        f = {k: v for k, v in f.items() if k not in ('body', 'length')}
+        f = {k: v for k, v in f.items() if k not in ('body', 'length', 'as_bot')}
         if f.get('url_private'):
             f['url_private'] = f['url_private'].format(base=BASE['url'])
         return ok(file=f)
     if method == 'files.getUploadURLExternal':
         fid = f'FUP{len(state["uploads"]) + 1}'
         state['uploads'][fid] = {'id': fid, 'name': params['filename'], 'title': params['filename'], 'size': int(params['length']),
-                                 'length': int(params['length']), 'permalink': f'https://team-a.slack.com/files/U0A1/{fid}/{params["filename"]}', 'body': None}
+                                 'length': int(params['length']), 'permalink': f'https://team-a.slack.com/files/U0A1/{fid}/{params["filename"]}', 'body': None,
+                                 'as_bot': is_bot}
         return ok(upload_url=f'{BASE["url"]}/upload/{fid}', file_id=fid)
     if method == 'files.completeUploadExternal':
         files = json.loads(params['files'])
@@ -231,6 +251,8 @@ def handle(method: str, params: dict, auth: dict):
             up['title'] = f.get('title') or up['title']
             up['shared'] = params.get('channel_id')
             up['comment'] = params.get('initial_comment')
+            up['username'] = params.get('username')
+            up['icon_emoji'] = params.get('icon_emoji')
             out.append({'id': f['id'], 'title': up['title']})
         return ok(files=out)
     if method == 'canvases.create':
@@ -290,7 +312,7 @@ async def app(scope, receive, send):
     method = path.split('/api/')[-1]
     token = headers.get('authorization', '').replace('Bearer ', '')
     params = {k: v[0] for k, v in parse_qs(body.decode()).items()}
-    calls.append((method, params))
+    calls.append((method, params, token))
     auth = TOKENS.get(token)
     if not auth:
         status, data = err('invalid_auth')

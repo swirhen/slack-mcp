@@ -1,8 +1,14 @@
 {
   "display_information": {
     "name": "slack-mcp (自宅サーバー)",
-    "description": "自宅サーバーの MCP サーバーから、自分の代わりに Slack を読み書きする",
+    "description": "自宅サーバーの MCP サーバーから、AI ごとの名前の bot として投稿し、自分の権限で読む",
     "background_color": "#2c2d30"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "AI",
+      "always_online": false
+    }
   },
   "oauth_config": {
     "scopes": {
@@ -35,6 +41,16 @@
         "emoji:read",
         "team:read",
         "usergroups:read"
+      ],
+      "bot": [
+        "chat:write",
+        "chat:write.public",
+        "chat:write.customize",
+        "reactions:write",
+        "files:read",
+        "files:write",
+        "im:write",
+        "mpim:write"
       ]
     }
   },
